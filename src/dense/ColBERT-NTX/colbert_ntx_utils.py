@@ -76,8 +76,19 @@ def load_paper_text_map(parquet_file):
 # ColBERT Aggregation for NT-Xent
 # ======================================================================
 def colbert_aggregate(token_embeddings):
-    """Mean pool ColBERT token embeddings to single doc vector."""
-    aggregated = token_embeddings.mean(dim=1)
+    """
+    Mean pool ColBERT token embeddings to single doc vector.
+    Excludes zero-vector tokens (padding) to prevent dilution.
+    ColBERT masks padded tokens to zero, so we detect them by norm.
+    """
+    # token_embeddings: [batch, num_tokens, dim]
+    # Detect non-padding: tokens with non-zero norm
+    token_norms = token_embeddings.norm(dim=-1, keepdim=True)  # [B, T, 1]
+    mask = (token_norms > 1e-8).float()                         # [B, T, 1]
+    # Sum non-padding tokens and divide by count
+    summed = (token_embeddings * mask).sum(dim=1)               # [B, dim]
+    counts = mask.sum(dim=1).clamp(min=1.0)                     # [B, 1]
+    aggregated = summed / counts
     aggregated = F.normalize(aggregated, p=2, dim=-1)
     return aggregated
 
@@ -85,7 +96,10 @@ def colbert_aggregate(token_embeddings):
 class ColBERTNTXentLoss(nn.Module):
     def __init__(self, temperature=TEMPERATURE):
         super().__init__()
-        self.temperature = temperature
+        # Use a learnable log-temperature to avoid collapse.
+        # Initialize at log(1/temperature) so exp() gives ~1/0.07 ≈ 14.3
+        # but clamp it to prevent extreme scaling.
+        self.log_temperature = nn.Parameter(torch.tensor(np.log(1.0 / temperature)))
         self.ce = nn.CrossEntropyLoss()
 
     def forward(self, emb1, emb2):
@@ -93,10 +107,16 @@ class ColBERTNTXentLoss(nn.Module):
         emb2 = emb2.float()
         doc_emb1 = colbert_aggregate(emb1)
         doc_emb2 = colbert_aggregate(emb2)
+
+        # Check for degenerate embeddings (all-zero after aggregation)
+        if doc_emb1.norm(dim=-1).min() < 1e-6 or doc_emb2.norm(dim=-1).min() < 1e-6:
+            return torch.tensor(0.0, device=emb1.device, requires_grad=True)
+
         B = doc_emb1.size(0)
         Z = torch.cat([doc_emb1, doc_emb2], dim=0)
-        sim = torch.matmul(Z, Z.T) / self.temperature
-        sim = torch.clamp(sim, min=-20, max=20)
+        # Clamp temperature scale to [1, 100] to prevent collapse
+        temp_scale = self.log_temperature.exp().clamp(min=1.0, max=100.0)
+        sim = torch.matmul(Z, Z.T) * temp_scale
         mask = torch.eye(2 * B, dtype=torch.bool, device=Z.device)
         sim = sim.masked_fill(mask, -1e9)
         labels = torch.arange(B, device=Z.device)
