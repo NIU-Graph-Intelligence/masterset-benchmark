@@ -97,6 +97,22 @@ def build_index_for_label(label_key):
         log(f"  Fine-tuned model not found for {cfg['name']} — skipping.")
         return
 
+    # Ensure ColBERT config JSON exists (may be missing if model.save() failed
+    # during training and fell back to state_dict-only save)
+    config_path = model_dir / "artifact.metadata"
+    if not config_path.exists() or config_path.stat().st_size == 0:
+        import ujson
+        colbert_meta = {
+            "query_token_id": "[unused0]", "doc_token_id": "[unused1]",
+            "query_token": "[Q]", "doc_token": "[D]",
+            "similarity": "cosine", "dim": 128, "doc_maxlen": DOC_MAXLEN,
+            "query_maxlen": DOC_MAXLEN, "mask_punctuation": True,
+            "checkpoint": CHECKPOINT,
+        }
+        with open(config_path, "w") as f:
+            ujson.dump(colbert_meta, f)
+        log(f"  Created missing ColBERT config at {config_path}")
+
     index_name = f"colbert_ntx_{label_key}"
     index_root = INDEXES_DIR / label_key
     index_root.mkdir(parents=True, exist_ok=True)
