@@ -53,7 +53,7 @@ ALL_PAPERS_PARQUET = DATA_DIR / "train_eval_set/v2.0/all_papers_with_refs_and_la
 MODELS_DIR = OUTPUT_DIR / "dense/ColBERT-NTX/fine_tuned_models/"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 TOKENIZER = AutoTokenizer.from_pretrained("bert-base-uncased", use_fast=True)
 
 
@@ -183,6 +183,22 @@ def fine_tune_for_label(label_type_key, paper_text_map):
         model.save(str(final_model_dir))
     except Exception:
         torch.save(model.state_dict(), final_model_dir / "model.pt")
+
+    # Always ensure a valid ColBERT config JSON exists for the Indexer
+    config_path = final_model_dir / "artifact.metadata"
+    if not config_path.exists() or config_path.stat().st_size == 0:
+        import ujson
+        colbert_meta = {
+            "query_token_id": "[unused0]", "doc_token_id": "[unused1]",
+            "query_token": "[Q]", "doc_token": "[D]",
+            "similarity": "cosine", "dim": 128, "doc_maxlen": DOC_MAXLEN,
+            "query_maxlen": DOC_MAXLEN, "mask_punctuation": True,
+            "checkpoint": CHECKPOINT,  # original base model name
+        }
+        with open(config_path, "w") as f:
+            ujson.dump(colbert_meta, f)
+        log(f"  Wrote ColBERT config to {config_path}")
+
     log(f"  Final model saved to {final_model_dir}")
 
 
