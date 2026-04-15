@@ -314,7 +314,7 @@ class KTRModel(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.hidden_dim = hidden_dim
-        self.topic_gcn = TopicGCN(embed_dim, hidden_dim, GCN_LAYERS, ETA)
+        self.topic_gcn = TopicGCN(hidden_dim, hidden_dim, GCN_LAYERS, ETA)
         self.concept_proj = nn.Linear(embed_dim, hidden_dim)
         self.structure_gcn = StructureGCN(num_papers, hidden_dim, GCN_LAYERS)
         self.path_gru = PathGRU(hidden_dim, hidden_dim)
