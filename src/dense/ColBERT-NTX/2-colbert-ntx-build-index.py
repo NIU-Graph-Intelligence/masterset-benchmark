@@ -29,7 +29,7 @@ from colbert import Indexer
 
 from colbert_ntx_utils import (
     log, load_paper_text_map, chunk_by_wordpieces,
-    LABEL_TYPES, DOC_MAXLEN, NBITS,
+    LABEL_TYPES, DOC_MAXLEN, NBITS, CHECKPOINT,
 )
 
 load_dotenv()
