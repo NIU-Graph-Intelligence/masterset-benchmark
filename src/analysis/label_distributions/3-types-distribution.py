@@ -19,6 +19,11 @@ DATAFRAME_DIR = DATA_DIR / "train_eval_set/v2.0/all_papers_with_refs_and_labels_
 
 FIGURE_OUTPUT_DIR = OUTPUT_DIR / "analysis/all_papers_distributions"
 
+# Headroom above the tallest bar, so value labels fit inside the axes and
+# do not overlap with the title when tight_layout() runs.
+Y_HEADROOM_SINGLE = 1.25   # single-panel figures
+Y_HEADROOM_MULTI  = 1.2   # multi-panel combined figures (titles are closer)
+
 
 def extract_all_scores(df: pd.DataFrame):
     """Extract all valid type_1, type_2, type_3 values from references across all papers."""
@@ -180,6 +185,7 @@ def plot_type1_distribution(type1: np.ndarray, output_dir: Path):
     ax.set_xlabel("Type I Label")
     ax.set_ylabel("Number of References")
     ax.set_title("Distribution of Type I (Experimental Baseline)")
+    ax.set_ylim(0, max(counts) * Y_HEADROOM_SINGLE)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
 
     plt.tight_layout()
@@ -207,9 +213,14 @@ def plot_type2_distribution(type2: np.ndarray, output_dir: Path):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(counts) * 0.02,
                 f'{count:,}\n({pct:.1f}%)', ha='center', va='bottom', fontsize=8)
 
-    # Draw the must-cite threshold line
+    # Set y-limit BEFORE drawing threshold labels so headroom is reserved
+    ax.set_ylim(0, max(counts) * Y_HEADROOM_SINGLE)
+
+    # Draw the must-cite threshold line; put the label in the left gap (x<2.5)
+    # so it does not sit on top of any bar.
     ax.axvline(x=2.5, color='#E8453C', linestyle='--', linewidth=1.2, alpha=0.7)
-    ax.text(2.65, max(counts) * 0.9, 'Must-cite\nthreshold', fontsize=8, color='#E8453C')
+    ax.text(2.4, max(counts) * 1.05, 'Must-cite threshold',
+            fontsize=8, color='#E8453C', ha='right', va='center')
 
     ax.set_xlabel("Type II Score (Core Relevance)")
     ax.set_ylabel("Number of References")
@@ -261,6 +272,7 @@ def plot_type3_distribution(type3: np.ndarray, output_dir: Path):
     ax.set_xlabel("Citation Frequency Score (Type III)")
     ax.set_ylabel("Number of References")
     ax.set_title("Distribution of Type III (Intra-Paper Mention Frequency)")
+    ax.set_ylim(0, max(freqs_capped) * Y_HEADROOM_SINGLE)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
 
     plt.tight_layout()
@@ -279,6 +291,7 @@ def plot_type3_distribution(type3: np.ndarray, output_dir: Path):
     ax.set_ylabel("Cumulative Proportion")
     ax.set_title("CDF of Type III (Intra-Paper Mention Frequency)")
     ax.set_xlim(0, min(max_val, 20))
+    ax.set_ylim(0, 1.05)
 
     for t, color, ls in [(2, '#E8453C', '-'), (3, '#F4A024', '--'), (5, '#2BA84A', ':')]:
         pct_below = np.sum(type3 < t) / len(type3)
@@ -306,6 +319,7 @@ def plot_type3_distribution(type3: np.ndarray, output_dir: Path):
     ax1.set_xlabel("Citation Frequency Score")
     ax1.set_ylabel("Number of References")
     ax1.set_title("(a) Score Distribution")
+    ax1.set_ylim(0, max(freqs_capped) * Y_HEADROOM_SINGLE)
     ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
 
     ax2.plot(sorted_scores, cdf, color='#2E86AB', linewidth=1.5)
@@ -313,6 +327,7 @@ def plot_type3_distribution(type3: np.ndarray, output_dir: Path):
     ax2.set_ylabel("Cumulative Proportion")
     ax2.set_title("(b) Cumulative Distribution")
     ax2.set_xlim(0, min(max_val, 20))
+    ax2.set_ylim(0, 1.05)
 
     for t, color, ls in [(2, '#E8453C', '-'), (3, '#F4A024', '--'), (5, '#2BA84A', ':')]:
         pct_below = np.sum(type3 < t) / len(type3)
@@ -346,6 +361,7 @@ def plot_all_three_combined(type1: np.ndarray, type2: np.ndarray, type3: np.ndar
     ax1.set_xlabel("Label")
     ax1.set_ylabel("Count")
     ax1.set_title("(a) Type I: Experimental Baseline")
+    ax1.set_ylim(0, max(t1_counts) * Y_HEADROOM_MULTI)
     ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
 
     # --- Type II ---
@@ -361,6 +377,7 @@ def plot_all_three_combined(type1: np.ndarray, type2: np.ndarray, type3: np.ndar
     ax2.set_xlabel("Score")
     ax2.set_ylabel("Count")
     ax2.set_title("(b) Type II: Core Relevance")
+    ax2.set_ylim(0, max(t2_counts) * Y_HEADROOM_MULTI)
     ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
 
     # --- Type III ---
@@ -385,6 +402,7 @@ def plot_all_three_combined(type1: np.ndarray, type2: np.ndarray, type3: np.ndar
     ax3.set_xlabel("Frequency")
     ax3.set_ylabel("Count")
     ax3.set_title("(c) Type III: Mention Frequency")
+    ax3.set_ylim(0, max(t3_freqs) * Y_HEADROOM_MULTI)
     ax3.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
 
     plt.tight_layout()
