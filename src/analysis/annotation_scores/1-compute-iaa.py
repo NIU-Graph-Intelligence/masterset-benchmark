@@ -1,24 +1,34 @@
 """
 compute_iaa.py
 
-Computes Inter-Annotator Agreement (IAA) for the human validation study.
+Computes Inter-Annotator Agreement (IAA) across the full human validation
+set of 510 citation instances, where each instance is independently labelled
+by either 2 or 6 annotators.
 
-Primary metrics (as reported in the paper):
-  - Type I  (binary 0/1):      Fleiss' kappa
-  - Type II (ordinal 1-5):     Krippendorff's alpha with ordinal weights
+Design notes
+------------
+Because the number of raters varies per item (2 vs 6), Fleiss' kappa is no
+longer applicable as a single headline metric -- it assumes a fixed number of
+raters. Krippendorff's alpha is the natural replacement: it handles missing
+data and variable rater counts per item natively. We therefore use alpha as
+the primary IAA statistic on the combined 510-instance set.
 
-Supporting metrics (for appendix / robustness):
-  - Pairwise Cohen's kappa (Type I)
-  - Pairwise weighted Cohen's kappa, quadratic weights (Type II)
-  - % exact agreement
-  - % within +/-1 (Type II only)
-  - Krippendorff's alpha nominal (Type I, for cross-check)
-  - Label distributions per annotator
+Primary metrics (reported in Table \\ref{tab:agreement}):
+  - Type I  (binary 0/1):      Krippendorff's alpha (nominal)
+  - Type II (ordinal 1-5):     Krippendorff's alpha (ordinal weights)
+
+Supporting metrics (for appendix):
+  - % exact agreement per item (unanimous across the item's raters)
+  - % within +/-1 across all raters (Type II only)
+  - Pairwise Cohen's kappa (Type I) and quadratic-weighted kappa (Type II),
+    computed on each pair's co-rated subset with per-pair n reported
+  - Per-annotator label distributions
 
 Outputs:
   - Console summary
-  - JSON file with all metrics (for reproducibility)
-  - Long-format CSV with merged annotations (for downstream LLM-vs-human)
+  - iaa_results.json              (all metrics, for reproducibility)
+  - all_annotations_long.csv      (one row per (instance, annotator) with
+                                   numeric labels -- used by downstream steps)
 """
 
 import json
@@ -29,143 +39,177 @@ import numpy as np
 import pandas as pd
 import krippendorff
 from sklearn.metrics import cohen_kappa_score
-from statsmodels.stats.inter_rater import fleiss_kappa, aggregate_raters
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-OVERLAP_DIR = Path("data/annotations/overlap_sets")
+OVERLAP_DIR  = Path("data/annotations/overlap_sets")
+DISJOINT_DIR = Path("data/annotations/disjoint_sets")
 
-ANNOTATORS = ["ratul", "dr_zhang", "tanish", "samikshya", "ibrahim", "shafayet"]
+# All six annotators; each appears in the overlap set AND in exactly one
+# disjoint block.
+OVERLAP_ANNOTATORS = ["ratul", "dr_zhang", "tanish", "samikshya", "ibrahim", "shafayet"]
+
+# (block_name, [annotator, annotator]) -- the two raters who labelled the block.
+# NB: the file on disk uses 'drzhang' (no underscore) in the block/filename,
+# but the annotator's canonical name (column and rater id) is 'dr_zhang'.
+DISJOINT_BLOCKS = [
+    ("drzhang",   [("drzhang",   "dr_zhang"),  ("ratul",     "ratul")]),
+    ("samikshya", [("samikshya", "samikshya"), ("tanish",    "tanish")]),
+    ("shafayet",  [("shafayet",  "shafayet"),  ("ibrahim",   "ibrahim")]),
+]
 
 TYPE1_COL = "Baseline? (0/1)"
 TYPE2_COL = "Relevance Score (1-5)"
-
-# Dropdown string -> numeric mapping
-TYPE1_MAP = {
-    "Not a Baseline - 0": 0,
-    "Baseline - 1": 1,
-}
+TYPE1_MAP = {"Not a Baseline - 0": 0, "Baseline - 1": 1}
 TYPE2_MAP = {
-    "1 Background": 1,
-    "2 Broad Area": 2,
-    "3 Conceptually Related": 3,
-    "4 Task or Component": 4,
-    "5 Core Relevance": 5,
+    "1 Background": 1, "2 Broad Area": 2, "3 Conceptually Related": 3,
+    "4 Task or Component": 4, "5 Core Relevance": 5,
 }
 
-OUTPUT_JSON = Path("output/analysis/annotation_scores/iaa_results.json")
-OUTPUT_MERGED_CSV = Path("output/analysis/annotation_scores/overlap_merged.csv")
+OUTPUT_JSON     = Path("output/analysis/annotation_scores/iaa_results.json")
+OUTPUT_LONG_CSV = Path("output/analysis/annotation_scores/all_annotations_long.csv")
 
 
 # ============================================================
-# Loading & normalisation
+# Loading
 # ============================================================
 
-def load_annotator(name: str) -> pd.DataFrame:
-    path = OVERLAP_DIR / f"overlap_{name}.csv"
+def load_and_normalise(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
-    # Map dropdown strings -> ints
     df[TYPE1_COL] = df[TYPE1_COL].map(TYPE1_MAP)
     df[TYPE2_COL] = df[TYPE2_COL].map(TYPE2_MAP)
-    # Sanity: no unmapped values
-    assert df[TYPE1_COL].notna().all(), f"{name}: unmapped Type I values"
-    assert df[TYPE2_COL].notna().all(), f"{name}: unmapped Type II values"
+    if df[TYPE1_COL].isna().any() or df[TYPE2_COL].isna().any():
+        raise ValueError(f"{path.name}: unmapped labels. Check the dropdown strings.")
     return df
 
 
-def build_matrices(annotations: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_all_annotations() -> pd.DataFrame:
     """
-    Returns two DataFrames indexed by instance_id, columns = annotator names.
-    One for Type I, one for Type II.
+    Returns a long-format DataFrame with columns:
+        instance_id, block, annotator, type1, type2
+    One row per (instance, annotator). Expected total rows:
+        120 overlap * 6 + 130 * 3 blocks * 2 = 720 + 780 = 1500
+    corresponding to 510 unique instances, each with 2 or 6 labels.
     """
-    # Use the first annotator as the instance order reference
-    first = annotations[ANNOTATORS[0]]
-    instance_ids = first["instance_id"].tolist()
+    long_rows = []
 
-    t1 = pd.DataFrame(index=instance_ids)
-    t2 = pd.DataFrame(index=instance_ids)
+    # -- overlap (120 x 6) --
+    for ann in OVERLAP_ANNOTATORS:
+        path = OVERLAP_DIR / f"overlap_{ann}.csv"
+        df = load_and_normalise(path)
+        for _, r in df.iterrows():
+            long_rows.append({
+                "instance_id": r["instance_id"],
+                "block":       "overlap",
+                "annotator":   ann,
+                "type1":       int(r[TYPE1_COL]),
+                "type2":       int(r[TYPE2_COL]),
+            })
 
-    for name in ANNOTATORS:
-        df = annotations[name].set_index("instance_id")
-        # Reindex to the reference order; any missing instance_ids become NaN
-        t1[name] = df.loc[instance_ids, TYPE1_COL].values
-        t2[name] = df.loc[instance_ids, TYPE2_COL].values
+    # -- disjoint blocks (130 x 2, three of them) --
+    for block_name, raters in DISJOINT_BLOCKS:
+        for file_tag, rater_name in raters:
+            path = DISJOINT_DIR / f"set_{block_name}_by_{file_tag}.csv"
+            df = load_and_normalise(path)
+            for _, r in df.iterrows():
+                long_rows.append({
+                    "instance_id": r["instance_id"],
+                    "block":       block_name,
+                    "annotator":   rater_name,
+                    "type1":       int(r[TYPE1_COL]),
+                    "type2":       int(r[TYPE2_COL]),
+                })
 
-    # Sanity: every annotator must have labelled every instance
-    assert t1.isna().sum().sum() == 0, f"Type I has missing labels:\n{t1.isna().sum()}"
-    assert t2.isna().sum().sum() == 0, f"Type II has missing labels:\n{t2.isna().sum()}"
-
-    return t1.astype(int), t2.astype(int)
+    out = pd.DataFrame(long_rows)
+    return out
 
 
 # ============================================================
-# Agreement metrics
+# Reliability-data construction for Krippendorff
 # ============================================================
 
-def compute_fleiss_kappa(matrix: pd.DataFrame, categories: list) -> float:
+def build_reliability_matrix(long: pd.DataFrame, label_col: str,
+                             all_annotators: list[str]) -> np.ndarray:
     """
-    matrix: rows = instances, columns = annotators, values = category labels.
-    statsmodels' fleiss_kappa needs a (n_items, n_categories) count matrix.
+    Returns a (n_raters, n_items) numpy array with NaN for missing
+    (rater, item) pairs -- the exact format krippendorff.alpha expects.
     """
-    counts = np.zeros((len(matrix), len(categories)), dtype=int)
-    for i, cat in enumerate(categories):
-        counts[:, i] = (matrix == cat).sum(axis=1).values
-    return fleiss_kappa(counts, method="fleiss")
+    items = sorted(long["instance_id"].unique())
+    item_idx = {iid: j for j, iid in enumerate(items)}
+    rater_idx = {r: i for i, r in enumerate(all_annotators)}
+
+    mat = np.full((len(all_annotators), len(items)), np.nan, dtype=float)
+    for _, r in long.iterrows():
+        i = rater_idx[r["annotator"]]
+        j = item_idx[r["instance_id"]]
+        mat[i, j] = float(r[label_col])
+    return mat, items
 
 
-def compute_krippendorff(matrix: pd.DataFrame, level: str) -> float:
+# ============================================================
+# Supporting statistics
+# ============================================================
+
+def per_item_exact_agreement(long: pd.DataFrame, label_col: str) -> float:
+    """Proportion of items where every rater who labelled the item agreed."""
+    g = long.groupby("instance_id")[label_col].nunique()
+    return float((g == 1).mean())
+
+
+def per_item_within_one(long: pd.DataFrame, label_col: str) -> float:
+    """Proportion of items where max - min across raters is <= 1 (Type II only)."""
+    g = long.groupby("instance_id")[label_col].agg(lambda s: s.max() - s.min())
+    return float((g <= 1).mean())
+
+
+def pairwise_kappa(long: pd.DataFrame, label_col: str,
+                   weights: str | None) -> dict:
     """
-    krippendorff.alpha expects a (n_raters, n_items) array with numeric values.
-    level: 'nominal', 'ordinal', or 'interval'.
+    Compute Cohen's kappa for every annotator pair that co-rated at least
+    MIN_PAIR_N items. Returns {pair_key: {"kappa": ..., "n": ...}}.
     """
-    data = matrix.T.values  # (n_raters, n_items)
-    return krippendorff.alpha(reliability_data=data, level_of_measurement=level)
+    MIN_PAIR_N = 10  # don't compute on tiny samples; shouldn't trigger here
+
+    raters = sorted(long["annotator"].unique())
+    wide = long.pivot(index="instance_id", columns="annotator", values=label_col)
+
+    out = {}
+    for a, b in itertools.combinations(raters, 2):
+        mask = wide[a].notna() & wide[b].notna()
+        n = int(mask.sum())
+        if n < MIN_PAIR_N:
+            continue
+        ya = wide.loc[mask, a].astype(int)
+        yb = wide.loc[mask, b].astype(int)
+        k = cohen_kappa_score(ya, yb, weights=weights)
+        out[f"{a}__vs__{b}"] = {"kappa": float(k), "n": n}
+    return out
 
 
-def percent_agreement(matrix: pd.DataFrame) -> float:
-    """Proportion of instances where ALL annotators agree."""
-    all_same = (matrix.nunique(axis=1) == 1).mean()
-    return float(all_same)
-
-
-def percent_within_one(matrix: pd.DataFrame) -> float:
-    """For ordinal: proportion of instances where max - min <= 1 across all annotators."""
-    spread = matrix.max(axis=1) - matrix.min(axis=1)
-    return float((spread <= 1).mean())
-
-
-def pairwise_kappas(matrix: pd.DataFrame, weights: str | None = None) -> dict:
-    """
-    Returns {(a, b): kappa} for all unique pairs.
-    weights: None for unweighted (Cohen's kappa), 'quadratic' for weighted.
-    """
-    result = {}
-    for a, b in itertools.combinations(matrix.columns, 2):
-        k = cohen_kappa_score(matrix[a], matrix[b], weights=weights)
-        result[f"{a}__vs__{b}"] = float(k)
-    return result
-
-
-def summary_stats(pairwise: dict) -> dict:
-    vals = list(pairwise.values())
+def pair_summary(pairwise: dict) -> dict:
+    vals = [v["kappa"] for v in pairwise.values()]
+    if not vals:
+        return {"mean": None, "median": None, "min": None, "max": None,
+                "std": None, "n_pairs": 0}
     return {
-        "mean": float(np.mean(vals)),
-        "median": float(np.median(vals)),
-        "min": float(np.min(vals)),
-        "max": float(np.max(vals)),
-        "std": float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0,
+        "mean":    float(np.mean(vals)),
+        "median":  float(np.median(vals)),
+        "min":     float(np.min(vals)),
+        "max":     float(np.max(vals)),
+        "std":     float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0,
+        "n_pairs": len(vals),
     }
 
 
-def label_distribution(matrix: pd.DataFrame) -> dict:
-    """Distribution of labels per annotator."""
-    return {
-        ann: matrix[ann].value_counts().sort_index().to_dict()
-        for ann in matrix.columns
-    }
+def label_distribution(long: pd.DataFrame, label_col: str) -> dict:
+    out = {}
+    for ann, sub in long.groupby("annotator"):
+        vc = sub[label_col].value_counts().sort_index().to_dict()
+        out[ann] = {int(k): int(v) for k, v in vc.items()}
+    return out
 
 
 # ============================================================
@@ -173,104 +217,118 @@ def label_distribution(matrix: pd.DataFrame) -> dict:
 # ============================================================
 
 def main():
-    print("=" * 70)
-    print("Loading annotations...")
-    print("=" * 70)
-    annotations = {}
-    for name in ANNOTATORS:
-        df = load_annotator(name)
-        annotations[name] = df
-        print(f"  {name:12s}: {len(df)} instances")
+    print("=" * 72)
+    print("Loading annotations (overlap + three disjoint blocks) ...")
+    print("=" * 72)
+    long = load_all_annotations()
 
-    t1, t2 = build_matrices(annotations)
-    n_instances = len(t1)
-    n_annotators = len(ANNOTATORS)
-    print(f"\nMatrix shape: {n_instances} instances x {n_annotators} annotators")
+    # Sanity checks
+    n_instances = long["instance_id"].nunique()
+    n_rows      = len(long)
+    raters_per_item = long.groupby("instance_id")["annotator"].nunique()
+    print(f"  Total rows (instance-rater pairs): {n_rows}")
+    print(f"  Unique instances:                  {n_instances}")
+    print(f"  Raters per instance:               "
+          f"{dict(raters_per_item.value_counts().sort_index())}")
+    print(f"  Annotators:                        {sorted(long['annotator'].unique())}")
 
-    # =====================================================
-    # TYPE I (binary 0/1)
-    # =====================================================
-    print("\n" + "=" * 70)
-    print("TYPE I - Baseline classification (binary)")
-    print("=" * 70)
+    assert n_instances == 510, f"Expected 510 instances, got {n_instances}"
+    assert set(raters_per_item.unique()) == {2, 6}, \
+        f"Expected {{2, 6}} raters/instance, got {set(raters_per_item.unique())}"
 
-    t1_fleiss = compute_fleiss_kappa(t1, categories=[0, 1])
-    t1_alpha_nom = compute_krippendorff(t1, level="nominal")
-    t1_pct_agree = percent_agreement(t1)
-    t1_pairwise = pairwise_kappas(t1, weights=None)
-    t1_pairwise_stats = summary_stats(t1_pairwise)
-    t1_dist = label_distribution(t1)
-
-    print(f"  Fleiss' kappa:             {t1_fleiss:.4f}")
-    print(f"  Krippendorff's alpha:      {t1_alpha_nom:.4f}  (nominal)")
-    print(f"  % exact agreement (all 6): {t1_pct_agree * 100:.2f}%")
-    print(f"  Pairwise Cohen's kappa:    mean={t1_pairwise_stats['mean']:.4f}, "
-          f"median={t1_pairwise_stats['median']:.4f}, "
-          f"min={t1_pairwise_stats['min']:.4f}, "
-          f"max={t1_pairwise_stats['max']:.4f}")
-    print(f"\n  Label distribution (Type I):")
-    for ann, dist in t1_dist.items():
-        total = sum(dist.values())
-        print(f"    {ann:12s}: 0={dist.get(0, 0):3d}, 1={dist.get(1, 0):3d}  "
-              f"(baseline rate: {dist.get(1, 0)/total:.2%})")
+    all_annotators = sorted(long["annotator"].unique())
 
     # =====================================================
-    # TYPE II (ordinal 1-5)
+    # Type I (binary)
     # =====================================================
-    print("\n" + "=" * 70)
-    print("TYPE II - Relevance score (ordinal 1-5)")
-    print("=" * 70)
+    print("\n" + "=" * 72)
+    print("TYPE I  ---  Baseline classification (binary)")
+    print("=" * 72)
 
-    t2_alpha_ord = compute_krippendorff(t2, level="ordinal")
-    t2_alpha_int = compute_krippendorff(t2, level="interval")
-    t2_fleiss = compute_fleiss_kappa(t2, categories=[1, 2, 3, 4, 5])
-    t2_pct_exact = percent_agreement(t2)
-    t2_pct_within1 = percent_within_one(t2)
-    t2_pairwise = pairwise_kappas(t2, weights="quadratic")
-    t2_pairwise_stats = summary_stats(t2_pairwise)
-    t2_dist = label_distribution(t2)
+    t1_mat, _ = build_reliability_matrix(long, "type1", all_annotators)
+    t1_alpha = krippendorff.alpha(reliability_data=t1_mat,
+                                  level_of_measurement="nominal")
+    t1_pct_exact = per_item_exact_agreement(long, "type1")
+    t1_pairwise  = pairwise_kappa(long, "type1", weights=None)
+    t1_pair_sum  = pair_summary(t1_pairwise)
+    t1_dist      = label_distribution(long, "type1")
 
-    print(f"  Krippendorff's alpha (ordinal):   {t2_alpha_ord:.4f}   <-- primary")
-    print(f"  Krippendorff's alpha (interval):  {t2_alpha_int:.4f}")
-    print(f"  Fleiss' kappa (nominal):          {t2_fleiss:.4f}   (cross-check)")
-    print(f"  % exact agreement (all 6):        {t2_pct_exact * 100:.2f}%")
-    print(f"  % within +/-1 (max-min across 6): {t2_pct_within1 * 100:.2f}%")
-    print(f"  Pairwise weighted kappa (quad):   mean={t2_pairwise_stats['mean']:.4f}, "
-          f"median={t2_pairwise_stats['median']:.4f}, "
-          f"min={t2_pairwise_stats['min']:.4f}, "
-          f"max={t2_pairwise_stats['max']:.4f}")
-    print(f"\n  Label distribution (Type II):")
-    for ann, dist in t2_dist.items():
-        row = "  ".join(f"{k}:{dist.get(k, 0):3d}" for k in [1, 2, 3, 4, 5])
-        mean_score = t2[ann].mean()
-        print(f"    {ann:12s}: {row}   (mean: {mean_score:.2f})")
+    print(f"  Krippendorff's alpha (nominal):      {t1_alpha:.4f}  <-- headline")
+    print(f"  % exact agreement (per item):        {t1_pct_exact * 100:.2f}%")
+    print(f"  Pairwise Cohen's kappa ({t1_pair_sum['n_pairs']} pairs): "
+          f"mean={t1_pair_sum['mean']:.4f}, "
+          f"median={t1_pair_sum['median']:.4f}, "
+          f"min={t1_pair_sum['min']:.4f}, "
+          f"max={t1_pair_sum['max']:.4f}")
+    print(f"\n  Per-annotator label distribution (Type I):")
+    for ann in all_annotators:
+        d = t1_dist.get(ann, {})
+        total = sum(d.values())
+        rate1 = d.get(1, 0) / total if total else 0.0
+        print(f"    {ann:10s}: 0={d.get(0, 0):4d}, 1={d.get(1, 0):4d}   "
+              f"(n={total}, baseline rate={rate1:.2%})")
 
     # =====================================================
-    # Save JSON
+    # Type II (ordinal 1-5)
+    # =====================================================
+    print("\n" + "=" * 72)
+    print("TYPE II  ---  Relevance score (ordinal 1-5)")
+    print("=" * 72)
+
+    t2_mat, _ = build_reliability_matrix(long, "type2", all_annotators)
+    t2_alpha_ord = krippendorff.alpha(reliability_data=t2_mat,
+                                      level_of_measurement="ordinal")
+    t2_alpha_int = krippendorff.alpha(reliability_data=t2_mat,
+                                      level_of_measurement="interval")
+    t2_pct_exact   = per_item_exact_agreement(long, "type2")
+    t2_pct_within1 = per_item_within_one(long, "type2")
+    t2_pairwise    = pairwise_kappa(long, "type2", weights="quadratic")
+    t2_pair_sum    = pair_summary(t2_pairwise)
+    t2_dist        = label_distribution(long, "type2")
+
+    print(f"  Krippendorff's alpha (ordinal):      {t2_alpha_ord:.4f}  <-- headline")
+    print(f"  Krippendorff's alpha (interval):     {t2_alpha_int:.4f}")
+    print(f"  % exact agreement (per item):        {t2_pct_exact * 100:.2f}%")
+    print(f"  % within +/-1 across all raters:     {t2_pct_within1 * 100:.2f}%")
+    print(f"  Pairwise weighted kappa ({t2_pair_sum['n_pairs']} pairs): "
+          f"mean={t2_pair_sum['mean']:.4f}, "
+          f"median={t2_pair_sum['median']:.4f}, "
+          f"min={t2_pair_sum['min']:.4f}, "
+          f"max={t2_pair_sum['max']:.4f}")
+    print(f"\n  Per-annotator label distribution (Type II):")
+    for ann in all_annotators:
+        d = t2_dist.get(ann, {})
+        total = sum(d.values())
+        row = "  ".join(f"{k}:{d.get(k, 0):3d}" for k in [1, 2, 3, 4, 5])
+        # Mean across this annotator's items
+        sub = long[long["annotator"] == ann]["type2"]
+        mean_s = sub.mean() if len(sub) else 0.0
+        print(f"    {ann:10s}: {row}   (n={total}, mean={mean_s:.2f})")
+
+    # =====================================================
+    # Save outputs
     # =====================================================
     results = {
         "n_instances": int(n_instances),
-        "n_annotators": int(n_annotators),
-        "annotators": ANNOTATORS,
+        "n_rater_item_pairs": int(n_rows),
+        "annotators": all_annotators,
+        "raters_per_item_distribution": {int(k): int(v) for k, v
+                                         in raters_per_item.value_counts().items()},
         "type_1": {
-            "fleiss_kappa": float(t1_fleiss),
-            "krippendorff_alpha_nominal": float(t1_alpha_nom),
-            "pct_exact_agreement": float(t1_pct_agree),
+            "krippendorff_alpha_nominal": float(t1_alpha),
+            "pct_exact_agreement": float(t1_pct_exact),
             "pairwise_cohen_kappa": t1_pairwise,
-            "pairwise_summary": t1_pairwise_stats,
-            "label_distribution": {ann: {str(k): int(v) for k, v in d.items()}
-                                   for ann, d in t1_dist.items()},
+            "pairwise_summary": t1_pair_sum,
+            "label_distribution": t1_dist,
         },
         "type_2": {
-            "krippendorff_alpha_ordinal": float(t2_alpha_ord),
+            "krippendorff_alpha_ordinal":  float(t2_alpha_ord),
             "krippendorff_alpha_interval": float(t2_alpha_int),
-            "fleiss_kappa_nominal": float(t2_fleiss),
             "pct_exact_agreement": float(t2_pct_exact),
             "pct_within_one": float(t2_pct_within1),
             "pairwise_weighted_kappa_quadratic": t2_pairwise,
-            "pairwise_summary": t2_pairwise_stats,
-            "label_distribution": {ann: {str(k): int(v) for k, v in d.items()}
-                                   for ann, d in t2_dist.items()},
+            "pairwise_summary": t2_pair_sum,
+            "label_distribution": t2_dist,
         },
     }
 
@@ -279,31 +337,18 @@ def main():
         json.dump(results, f, indent=2)
     print(f"\nSaved JSON: {OUTPUT_JSON}")
 
-    # =====================================================
-    # Save merged long CSV for downstream steps (LLM-vs-human)
-    # =====================================================
-    first = annotations[ANNOTATORS[0]]
-    merged = first[["instance_id", "paper_id", "venue", "year",
-                    "Current Paper", "Ref Paper", "Contexts"]].copy()
-    for ann in ANNOTATORS:
-        merged[f"type1_{ann}"] = t1[ann].values
-        merged[f"type2_{ann}"] = t2[ann].values
-
-    # Majority vote / median (adjudicated gold)
-    merged["type1_majority"] = t1.mode(axis=1)[0].values.astype(int)
-    merged["type2_median"] = t2.median(axis=1).values
-
-    merged.to_csv(OUTPUT_MERGED_CSV, index=False)
-    print(f"Saved merged: {OUTPUT_MERGED_CSV}")
+    long.to_csv(OUTPUT_LONG_CSV, index=False)
+    print(f"Saved long CSV: {OUTPUT_LONG_CSV}  ({len(long)} rows)")
 
     # =====================================================
-    # LaTeX-ready summary
+    # Paper-ready summary
     # =====================================================
-    print("\n" + "=" * 70)
-    print("FOR THE PAPER (Table \\ref{tab:agreement})")
-    print("=" * 70)
-    print(f"  Type I  inter-annotator (Fleiss' kappa):         {t1_fleiss:.3f}")
-    print(f"  Type II inter-annotator (Krippendorff ordinal):  {t2_alpha_ord:.3f}")
+    print("\n" + "=" * 72)
+    print("FOR THE PAPER (Table \\ref{tab:agreement}, inter-annotator column)")
+    print("=" * 72)
+    print(f"  n instances = {n_instances} (2-6 annotators per instance)")
+    print(f"  Type I  Krippendorff's alpha (nominal): {t1_alpha:.3f}")
+    print(f"  Type II Krippendorff's alpha (ordinal): {t2_alpha_ord:.3f}")
 
 
 if __name__ == "__main__":

@@ -1,35 +1,44 @@
 """
 build_gold_standard.py
 
-Builds the adjudicated human gold standard from:
-  - 120 six-way overlap annotations (majority vote for Type I, median for Type II)
-  - 390 two-way disjoint annotations across 3 blocks, each annotated by 2 people
-    (adjudication strategy configurable per TIE_BREAKER_STRATEGY)
+Builds the adjudicated human gold standard on all 510 instances using the
+rules specified for this release.
 
-For the overlap set, adjudication is unambiguous:
-  Type I  -> majority vote across 6 annotators
-  Type II -> median across 6 annotators (integer-valued since always an integer
-             lies within the six scores for a 1-5 ordinal scale)
+Adjudication rules
+------------------
+Each instance is independently labelled by either 2 or 6 annotators. Gold
+labels for Type I and Type II are computed INDEPENDENTLY -- an instance
+excluded from one task can still contribute to the other.
 
-For disjoint 2-annotator blocks, when the two annotators agree, their shared
-label is used. When they disagree, the tiebreaker strategy decides:
+Type I (binary):
+  * 2 raters  -> gold = shared label if both agree; else exclude from T1.
+  * 6 raters  -> gold = majority label if one label has strictly more votes
+                 (i.e. >= 4 of 6); else exclude from T1 (3-3 tie).
 
-  'exclude'    -> the instance is dropped from the gold set
-  'annotator1' -> use the label of the annotator named in the set name
-                  (e.g., set_drzhang_*  -> whatever dr_zhang labelled)
-  'annotator2' -> use the label of the other annotator
-                  (e.g., set_drzhang_by_ratul -> whatever ratul labelled)
+Type II (ordinal 1-5):
+  * 2 raters  -> gold = mean of the two labels if |a - b| <= 1 (preserves
+                 the ordinal information; the mean may be a half-integer
+                 such as 3.5); else exclude from T2.
+  * 6 raters  -> gold = modal label if one value has strictly more votes
+                 than any other; else exclude from T2 (tie).
 
-For Type II, we also support treating differences of 1 as 'agreement' via
-DISAGREEMENT_TOLERANCE = 1 (the two raters are within 1 point; take their mean
-rounded to the nearest integer). Set to 0 to treat any disagreement as a tie.
+No LLM labels are used anywhere in adjudication. The LLM is the system
+under evaluation; using it to break human ties would be circular.
+
+Inputs (relative to the project root):
+  data/annotations/overlap_sets/overlap_<annotator>.csv            (x6)
+  data/annotations/disjoint_sets/set_<block>_by_<annotator>.csv    (x6)
+  data/annotation/annotation_all_samples.xlsx                      (for target)
 
 Outputs (in output/analysis/annotation_scores/):
-  - human_gold.csv              : 510 rows with adjudicated type1_gold, type2_gold
-  - gold_build_report.json      : per-block stats (agreement rates, excluded rows, etc.)
+  human_gold.csv           : 510 rows; type1_gold/type2_gold are nullable ints
+                             (or floats for T2, because 2-rater adjudicated
+                             Type II may be a half-integer such as 3.5)
+  gold_build_report.json   : per-block and overall adjudication statistics
 """
 
 import json
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -40,27 +49,16 @@ import pandas as pd
 # CONFIG
 # ============================================================
 
-ROOT_DIR = Path("/home/ratul/masterset-recommendation/")
-OVERLAP_DIR = Path("data/annotations/overlap_sets")
+ROOT_DIR     = Path("/home/ratul/masterset-recommendation/")
+OVERLAP_DIR  = Path("data/annotations/overlap_sets")
 DISJOINT_DIR = Path("data/annotations/disjoint_sets")
 
 ALL_SAMPLES_PATH = ROOT_DIR / "data/annotation/annotation_all_samples.xlsx"
 
-OUTPUT_DIR = Path("output/analysis/annotation_scores")
+OUTPUT_DIR      = Path("output/analysis/annotation_scores")
 OUTPUT_GOLD_CSV = OUTPUT_DIR / "human_gold.csv"
-OUTPUT_REPORT = OUTPUT_DIR / "gold_build_report.json"
+OUTPUT_REPORT   = OUTPUT_DIR / "gold_build_report.json"
 
-# --- Adjudication strategy for disjoint (2-annotator) blocks ---
-# Options: 'exclude' | 'annotator1' | 'annotator2'
-#   'annotator1' = the primary annotator (the one the set is named after)
-#   'annotator2' = the other (secondary) annotator
-TIE_BREAKER_STRATEGY = "annotator1"
-
-# For Type II, treat |a - b| <= DISAGREEMENT_TOLERANCE as agreement, using
-# round((a+b)/2) as the adjudicated label. Set to 0 for strict equality.
-DISAGREEMENT_TOLERANCE_TYPE2 = 1
-
-# --- Column / label mappings ---
 TYPE1_COL = "Baseline? (0/1)"
 TYPE2_COL = "Relevance Score (1-5)"
 TYPE1_MAP = {"Not a Baseline - 0": 0, "Baseline - 1": 1}
@@ -69,40 +67,31 @@ TYPE2_MAP = {
     "4 Task or Component": 4, "5 Core Relevance": 5,
 }
 
-# --- Overlap set: 6 annotators ---
 OVERLAP_ANNOTATORS = ["ratul", "dr_zhang", "tanish", "samikshya", "ibrahim", "shafayet"]
 
-# --- Disjoint blocks: (primary_annotator, secondary_annotator) pairs
-#     primary = the person the set is named after (annotator1 in tiebreaker terms)
-#     secondary = the other annotator (annotator2) ---
+# (block_name, file_tag_of_primary, file_tag_of_secondary)
+# file_tag is what appears in "set_<block>_by_<tag>.csv"
 DISJOINT_BLOCKS = [
-    # (block_name, primary, secondary)
     ("drzhang",   "drzhang",   "ratul"),
     ("samikshya", "samikshya", "tanish"),
     ("shafayet",  "shafayet",  "ibrahim"),
 ]
 
+
 # ============================================================
-# Helpers
+# Loading
 # ============================================================
 
 def load_and_normalise(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     df[TYPE1_COL] = df[TYPE1_COL].map(TYPE1_MAP)
     df[TYPE2_COL] = df[TYPE2_COL].map(TYPE2_MAP)
-    missing1 = df[TYPE1_COL].isna().sum()
-    missing2 = df[TYPE2_COL].isna().sum()
-    if missing1 or missing2:
-        raise ValueError(
-            f"{path.name}: unmapped labels (Type I missing={missing1}, "
-            f"Type II missing={missing2}). Check for typos in the dropdown."
-        )
+    if df[TYPE1_COL].isna().any() or df[TYPE2_COL].isna().any():
+        raise ValueError(f"{path.name}: unmapped labels found.")
     return df
 
 
 def load_all_samples_lookup() -> pd.DataFrame:
-    """Return a DataFrame indexed by instance_id with columns we need to
-    recover (paper_id, target, venue, year, title)."""
     df = pd.read_excel(ALL_SAMPLES_PATH)
     keep = ["instance_id", "paper_id", "venue", "year", "title", "target",
             "ref_paper_title", "cited_as"]
@@ -111,25 +100,9 @@ def load_all_samples_lookup() -> pd.DataFrame:
     return df
 
 
-def resolve_target(instance_id: str, all_samples: pd.DataFrame) -> dict | None:
-    """
-    Given an instance_id from an annotator CSV (e.g. 'OVL_0066' or 'DR._0001'),
-    find the matching row in all_samples. The numeric suffix aligns; the prefix
-    does not. We index by numeric suffix since generate_annotation_sheet.py uses
-    the same 0-padded 4-digit counter across overlap / disjoint sets, but the
-    counter is RESET per sheet. So we fall back to paper_id-based disambiguation.
-    """
-    # Try direct index first (works if instance_id matches 'ALL_NNNN')
-    if instance_id in all_samples.index:
-        return all_samples.loc[instance_id].to_dict()
-    return None
-
-
 def resolve_target_by_paper(paper_id: str, ref_paper: str,
                             all_samples: pd.DataFrame) -> dict | None:
-    """Fallback: match by (paper_id, ref_paper_title) when instance_id differs.
-    The 'Ref Paper' column in annotator CSVs has form '<cited_as>: <ref_title>'
-    so we extract the title after the first ': '."""
+    """Match a row in annotation_all_samples.xlsx by (paper_id, ref_title)."""
     if ": " in ref_paper:
         ref_title = ref_paper.split(": ", 1)[1].strip()
     else:
@@ -145,7 +118,6 @@ def resolve_target_by_paper(paper_id: str, ref_paper: str,
 
 def attach_target(df: pd.DataFrame, all_samples: pd.DataFrame,
                   label: str) -> pd.DataFrame:
-    """Add a 'target' column by looking up each row in all_samples."""
     targets = []
     unresolved = 0
     for _, row in df.iterrows():
@@ -168,117 +140,120 @@ def attach_target(df: pd.DataFrame, all_samples: pd.DataFrame,
 # Adjudication
 # ============================================================
 
-def adjudicate_overlap(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
+def _majority_label(votes: list[int]) -> int | None:
     """
-    dfs: {annotator_name: DataFrame with columns including instance_id,
-          paper_id, Ref Paper, TYPE1_COL, TYPE2_COL, target}
-    Returns one row per instance with type1_gold, type2_gold.
+    Return the label with strictly the most votes, or None if there is a
+    tie for the top position.
     """
-    # Line up on instance_id
+    c = Counter(votes)
+    top = c.most_common()
+    if len(top) == 1:
+        return top[0][0]
+    if top[0][1] > top[1][1]:
+        return top[0][0]
+    return None  # tie for first place
+
+
+def adjudicate_overlap(dfs: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, dict]:
+    """
+    6-rater adjudication on the 120 overlap instances.
+
+    Type I : majority (>=4/6) else excluded.
+    Type II: modal label if unique else excluded.
+    """
     ref = dfs[OVERLAP_ANNOTATORS[0]].set_index("instance_id")
     order = ref.index.tolist()
 
-    t1 = pd.DataFrame(index=order)
-    t2 = pd.DataFrame(index=order)
+    t1_votes = {iid: [] for iid in order}
+    t2_votes = {iid: [] for iid in order}
     for name in OVERLAP_ANNOTATORS:
         d = dfs[name].set_index("instance_id").loc[order]
-        t1[name] = d[TYPE1_COL].astype(int).values
-        t2[name] = d[TYPE2_COL].astype(int).values
+        for iid in order:
+            t1_votes[iid].append(int(d.at[iid, TYPE1_COL]))
+            t2_votes[iid].append(int(d.at[iid, TYPE2_COL]))
 
-    # Type I: majority vote. With 6 raters, ties (3v3) possible; break via mean >= 0.5
-    t1_mean = t1.mean(axis=1)
-    type1_gold = (t1_mean >= 0.5).astype(int)
-
-    # Type II: median across 6. Median of 6 integers on 1-5 scale -> may be x.5;
-    # round to nearest even (banker's rounding avoids upward bias on ties).
-    type2_gold = np.round(t2.median(axis=1)).astype(int)
-
-    out = pd.DataFrame({
-        "instance_id": order,
-        "paper_id":    ref["paper_id"].values,
-        "venue":       ref["venue"].values,
-        "year":        ref["year"].values,
-        "title":       ref["Current Paper"].values,
-        "target":      ref["target"].values,
-        "type1_gold":  type1_gold.values,
-        "type2_gold":  type2_gold.values,
+    rows = []
+    stats = {
+        "n_instances": len(order),
         "n_annotators": 6,
-        "block":        "overlap",
-        "adjudication": "majority_vote (T1) / median (T2)",
-    })
-    return out
+        "type1_resolved": 0, "type1_excluded_tie": 0,
+        "type2_resolved": 0, "type2_excluded_tie": 0,
+    }
+
+    for iid in order:
+        t1 = _majority_label(t1_votes[iid])
+        if t1 is None:
+            stats["type1_excluded_tie"] += 1
+        else:
+            stats["type1_resolved"] += 1
+
+        t2 = _majority_label(t2_votes[iid])
+        if t2 is None:
+            stats["type2_excluded_tie"] += 1
+        else:
+            stats["type2_resolved"] += 1
+
+        rows.append({
+            "instance_id": iid,
+            "paper_id":    ref.at[iid, "paper_id"],
+            "venue":       ref.at[iid, "venue"],
+            "year":        ref.at[iid, "year"],
+            "title":       ref.at[iid, "Current Paper"],
+            "target":      ref.at[iid, "target"],
+            "type1_gold":  t1,
+            "type2_gold":  float(t2) if t2 is not None else None,
+            "n_annotators": 6,
+            "block":        "overlap",
+            "adjudication": "majority_vote",
+        })
+
+    return pd.DataFrame(rows), stats
 
 
-def adjudicate_disjoint(df_primary: pd.DataFrame, df_secondary: pd.DataFrame,
-                        block_name: str, primary: str, secondary: str,
-                        strategy: str, tol_type2: int) -> tuple[pd.DataFrame, dict]:
+def adjudicate_disjoint(df_a: pd.DataFrame, df_b: pd.DataFrame,
+                        block_name: str, ann_a: str, ann_b: str
+                        ) -> tuple[pd.DataFrame, dict]:
     """
-    Returns (gold_df, report_dict).
-    Strategy is applied only to disagreements.
+    2-rater adjudication on a 130-instance disjoint block.
+
+    Type I : both agree -> that label; else excluded.
+    Type II: |a-b| <= 1 -> mean (may be half-integer); else excluded.
     """
-    a = df_primary.set_index("instance_id")
-    b = df_secondary.set_index("instance_id")
+    a = df_a.set_index("instance_id")
+    b = df_b.set_index("instance_id")
     common = a.index.intersection(b.index)
     if len(common) != len(a) or len(common) != len(b):
-        print(f"  [WARN] block '{block_name}': primary has {len(a)} instances, "
-              f"secondary has {len(b)}, intersection {len(common)}")
+        print(f"  [WARN] block '{block_name}': a has {len(a)}, b has {len(b)}, "
+              f"intersection {len(common)}")
     a = a.loc[common]; b = b.loc[common]
 
     rows = []
     stats = {
-        "block": block_name, "primary": primary, "secondary": secondary,
-        "strategy": strategy, "tol_type2": tol_type2,
-        "total": len(common),
-        "type1_agree": 0, "type1_disagree": 0, "type1_excluded": 0,
-        "type2_agree": 0, "type2_within_tol": 0, "type2_disagree": 0,
-        "type2_excluded": 0,
+        "block": block_name, "annotator_a": ann_a, "annotator_b": ann_b,
+        "n_instances": len(common),
+        "type1_agree": 0, "type1_excluded_disagree": 0,
+        "type2_exact": 0, "type2_within_one": 0, "type2_excluded_gt_one": 0,
     }
 
     for iid in common:
-        pa_t1 = int(a.at[iid, TYPE1_COL]); pb_t1 = int(b.at[iid, TYPE1_COL])
-        pa_t2 = int(a.at[iid, TYPE2_COL]); pb_t2 = int(b.at[iid, TYPE2_COL])
+        a_t1 = int(a.at[iid, TYPE1_COL]); b_t1 = int(b.at[iid, TYPE1_COL])
+        a_t2 = int(a.at[iid, TYPE2_COL]); b_t2 = int(b.at[iid, TYPE2_COL])
 
-        # ---- Type I adjudication ----
-        if pa_t1 == pb_t1:
-            t1_gold = pa_t1
-            stats["type1_agree"] += 1
-            t1_excl = False
+        # ---- Type I ----
+        if a_t1 == b_t1:
+            t1 = a_t1; stats["type1_agree"] += 1
         else:
-            stats["type1_disagree"] += 1
-            if strategy == "exclude":
-                t1_gold = None
-                stats["type1_excluded"] += 1
-                t1_excl = True
-            elif strategy == "annotator1":
-                t1_gold = pa_t1; t1_excl = False
-            elif strategy == "annotator2":
-                t1_gold = pb_t1; t1_excl = False
-            else:
-                raise ValueError(f"Unknown TIE_BREAKER_STRATEGY: {strategy}")
+            t1 = None; stats["type1_excluded_disagree"] += 1
 
-        # ---- Type II adjudication ----
-        diff = abs(pa_t2 - pb_t2)
-        if diff == 0:
-            t2_gold = pa_t2; stats["type2_agree"] += 1; t2_excl = False
-        elif diff <= tol_type2:
-            # Within tolerance -> take rounded mean
-            t2_gold = int(round((pa_t2 + pb_t2) / 2))
-            stats["type2_within_tol"] += 1
-            t2_excl = False
+        # ---- Type II ----
+        d = abs(a_t2 - b_t2)
+        if d == 0:
+            t2 = float(a_t2); stats["type2_exact"] += 1
+        elif d == 1:
+            t2 = (a_t2 + b_t2) / 2.0      # half-integer kept
+            stats["type2_within_one"] += 1
         else:
-            stats["type2_disagree"] += 1
-            if strategy == "exclude":
-                t2_gold = None
-                stats["type2_excluded"] += 1
-                t2_excl = True
-            elif strategy == "annotator1":
-                t2_gold = pa_t2; t2_excl = False
-            elif strategy == "annotator2":
-                t2_gold = pb_t2; t2_excl = False
-
-        # Skip the row entirely only if BOTH labels got excluded
-        if t1_gold is None and t2_gold is None:
-            continue
+            t2 = None; stats["type2_excluded_gt_one"] += 1
 
         rows.append({
             "instance_id": iid,
@@ -287,11 +262,11 @@ def adjudicate_disjoint(df_primary: pd.DataFrame, df_secondary: pd.DataFrame,
             "year":        a.at[iid, "year"],
             "title":       a.at[iid, "Current Paper"],
             "target":      a.at[iid, "target"],
-            "type1_gold":  t1_gold,
-            "type2_gold":  t2_gold,
+            "type1_gold":  t1,
+            "type2_gold":  t2,
             "n_annotators": 2,
             "block":        block_name,
-            "adjudication": f"primary={primary} secondary={secondary} strategy={strategy}",
+            "adjudication": f"2-rater: {ann_a} & {ann_b}",
         })
 
     return pd.DataFrame(rows), stats
@@ -302,92 +277,110 @@ def adjudicate_disjoint(df_primary: pd.DataFrame, df_secondary: pd.DataFrame,
 # ============================================================
 
 def main():
-    print("=" * 70)
-    print(f"Building gold standard   |   tiebreaker={TIE_BREAKER_STRATEGY}   |   "
-          f"type2 tolerance={DISAGREEMENT_TOLERANCE_TYPE2}")
-    print("=" * 70)
+    print("=" * 72)
+    print("Building human gold standard (510 instances, 2-6 annotators each)")
+    print("=" * 72)
 
     print("\nLoading annotation_all_samples.xlsx ...")
     all_samples = load_all_samples_lookup()
     print(f"  {len(all_samples)} instances indexed")
 
-    # --- Overlap ---
-    print("\n[1/2] Loading overlap set (120 instances x 6 annotators) ...")
-    overlap = {}
+    # ---- Overlap ----
+    print("\n[1/2] Overlap (120 x 6 annotators) ...")
+    overlap_dfs = {}
     for name in OVERLAP_ANNOTATORS:
         path = OVERLAP_DIR / f"overlap_{name}.csv"
         df = load_and_normalise(path)
         df = attach_target(df, all_samples, label=f"overlap/{name}")
-        overlap[name] = df
-        print(f"  {name:10s}: {len(df)} rows")
+        overlap_dfs[name] = df
+        print(f"  {name:12s}: {len(df)} rows")
 
-    overlap_gold = adjudicate_overlap(overlap)
-    print(f"  -> overlap gold: {len(overlap_gold)} rows")
+    overlap_gold, overlap_stats = adjudicate_overlap(overlap_dfs)
+    print(f"  T1 resolved: {overlap_stats['type1_resolved']}   "
+          f"excluded (3-3 tie): {overlap_stats['type1_excluded_tie']}")
+    print(f"  T2 resolved: {overlap_stats['type2_resolved']}   "
+          f"excluded (tie):     {overlap_stats['type2_excluded_tie']}")
 
-    # --- Disjoint blocks ---
-    print("\n[2/2] Loading disjoint blocks (3 x 130 instances x 2 annotators) ...")
+    # ---- Disjoint blocks ----
+    print("\n[2/2] Disjoint (3 x 130 x 2 annotators) ...")
     disjoint_golds = []
-    block_reports = []
-    for block_name, primary, secondary in DISJOINT_BLOCKS:
-        path_p = DISJOINT_DIR / f"set_{block_name}_by_{primary}.csv"
-        path_s = DISJOINT_DIR / f"set_{block_name}_by_{secondary}.csv"
-        df_p = load_and_normalise(path_p)
-        df_s = load_and_normalise(path_s)
-        df_p = attach_target(df_p, all_samples, label=f"{block_name}/{primary}")
-        df_s = attach_target(df_s, all_samples, label=f"{block_name}/{secondary}")
+    block_stats = []
+    for block_name, file_tag_a, file_tag_b in DISJOINT_BLOCKS:
+        # canonical annotator name = file tag with possible underscore restoration
+        # for 'drzhang' -> 'dr_zhang'.
+        ann_a = "dr_zhang" if file_tag_a == "drzhang" else file_tag_a
+        ann_b = "dr_zhang" if file_tag_b == "drzhang" else file_tag_b
 
-        gold, stats = adjudicate_disjoint(
-            df_p, df_s, block_name, primary, secondary,
-            strategy=TIE_BREAKER_STRATEGY,
-            tol_type2=DISAGREEMENT_TOLERANCE_TYPE2,
-        )
+        path_a = DISJOINT_DIR / f"set_{block_name}_by_{file_tag_a}.csv"
+        path_b = DISJOINT_DIR / f"set_{block_name}_by_{file_tag_b}.csv"
+        df_a = load_and_normalise(path_a)
+        df_b = load_and_normalise(path_b)
+        df_a = attach_target(df_a, all_samples, label=f"{block_name}/{ann_a}")
+        df_b = attach_target(df_b, all_samples, label=f"{block_name}/{ann_b}")
+
+        gold, stats = adjudicate_disjoint(df_a, df_b, block_name, ann_a, ann_b)
         disjoint_golds.append(gold)
-        block_reports.append(stats)
-        print(f"  block '{block_name}': {stats['total']} instances | "
-              f"T1 agree {stats['type1_agree']}, disagree {stats['type1_disagree']} "
-              f"(excl {stats['type1_excluded']}) | "
-              f"T2 exact {stats['type2_agree']}, within tol {stats['type2_within_tol']}, "
-              f"disagree {stats['type2_disagree']} (excl {stats['type2_excluded']})")
+        block_stats.append(stats)
+        print(f"  '{block_name}' ({ann_a} & {ann_b}): "
+              f"T1 agree {stats['type1_agree']}/{stats['n_instances']} "
+              f"(excl {stats['type1_excluded_disagree']}) | "
+              f"T2 exact {stats['type2_exact']}, "
+              f"within-1 {stats['type2_within_one']}, "
+              f"excl {stats['type2_excluded_gt_one']}")
 
-    # --- Combine ---
+    # ---- Combine ----
     gold = pd.concat([overlap_gold] + disjoint_golds, ignore_index=True)
-    print(f"\nTotal gold rows: {len(gold)}")
-    print(f"  type1_gold missing: {gold['type1_gold'].isna().sum()}")
-    print(f"  type2_gold missing: {gold['type2_gold'].isna().sum()}")
+    print(f"\nTotal gold rows:         {len(gold)}")
+    print(f"  type1_gold available:  {gold['type1_gold'].notna().sum()} "
+          f"(excluded: {gold['type1_gold'].isna().sum()})")
+    print(f"  type2_gold available:  {gold['type2_gold'].notna().sum()} "
+          f"(excluded: {gold['type2_gold'].isna().sum()})")
 
-    # Cast to nullable int for clean CSV output
+    # T1 is always integer; T2 may be half-integer (2-rater), so keep as float.
     gold["type1_gold"] = gold["type1_gold"].astype("Int64")
-    gold["type2_gold"] = gold["type2_gold"].astype("Int64")
+    # type2_gold stays as float (NaN-aware); easy to cast downstream
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     gold.to_csv(OUTPUT_GOLD_CSV, index=False)
     print(f"\nSaved: {OUTPUT_GOLD_CSV}")
 
-    # --- Distribution summary ---
-    print("\n--- Gold label distributions ---")
+    # ---- Distribution summary ----
+    print("\n--- Gold label distributions (non-excluded rows only) ---")
     print(f"Type I : {dict(gold['type1_gold'].value_counts().sort_index())}")
-    print(f"Type II: {dict(gold['type2_gold'].value_counts().sort_index())}")
+    t2_counts = gold["type2_gold"].value_counts().sort_index().to_dict()
+    print(f"Type II: {t2_counts}")
 
     report = {
-        "config": {
-            "tiebreaker_strategy": TIE_BREAKER_STRATEGY,
-            "type2_tolerance": DISAGREEMENT_TOLERANCE_TYPE2,
+        "rules": {
+            "type_1": {
+                "2_raters": "agree -> gold; disagree -> excluded",
+                "6_raters": "majority (>=4/6) -> gold; 3-3 tie -> excluded",
+            },
+            "type_2": {
+                "2_raters": "|a-b|<=1 -> mean (may be half-integer); else excluded",
+                "6_raters": "modal label if unique -> gold; tie -> excluded",
+            },
+            "tasks_independent": True,
+            "llm_used_in_adjudication": False,
         },
-        "overlap": {
-            "n_instances": len(overlap_gold),
-            "n_annotators": 6,
-            "type1_dist": {str(k): int(v) for k, v in
-                           overlap_gold["type1_gold"].value_counts().sort_index().items()},
-            "type2_dist": {str(k): int(v) for k, v in
-                           overlap_gold["type2_gold"].value_counts().sort_index().items()},
+        "overlap": overlap_stats,
+        "disjoint_blocks": block_stats,
+        "totals": {
+            "rows":                len(gold),
+            "type1_resolved":      int(gold["type1_gold"].notna().sum()),
+            "type1_excluded":      int(gold["type1_gold"].isna().sum()),
+            "type2_resolved":      int(gold["type2_gold"].notna().sum()),
+            "type2_excluded":      int(gold["type2_gold"].isna().sum()),
         },
-        "disjoint_blocks": block_reports,
-        "total_gold_rows": len(gold),
-        "missing_type1": int(gold["type1_gold"].isna().sum()),
-        "missing_type2": int(gold["type2_gold"].isna().sum()),
+        "label_distributions": {
+            "type_1": {str(k): int(v) for k, v
+                       in gold["type1_gold"].value_counts().sort_index().items()},
+            "type_2": {str(k): int(v) for k, v
+                       in gold["type2_gold"].value_counts().sort_index().items()},
+        },
     }
     with open(OUTPUT_REPORT, "w") as f:
-        json.dump(report, f, indent=2)
+        json.dump(report, f, indent=2, default=str)
     print(f"Saved: {OUTPUT_REPORT}")
 
 
