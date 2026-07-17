@@ -46,10 +46,11 @@ from colbert_utils import (
 
 # -------- Config --------
 load_dotenv()
-DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+DATA_DIR = Path(os.getenv("DATA_DIR", "../data/masterset"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-TRAIN_PARQUET = DATA_DIR / "train_eval_set/v2.0/train_v2.0.parquet"
+TRAIN_PARQUET = DATA_DIR / "train_eval_set/v2.0/train.parquet"
 
 COLBERT_DIR = OUTPUT_DIR / "dense/ColBERT/"
 COLBERT_DIR.mkdir(parents=True, exist_ok=True)
