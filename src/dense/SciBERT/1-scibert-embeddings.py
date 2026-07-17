@@ -12,13 +12,13 @@ from scibert_utils import generate_embeddings, SEP, MODEL_NAME, MAX_LENGTH, BATC
 
 # -------- Config --------
 load_dotenv()
-DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+DATA_DIR = Path(os.getenv("DATA_DIR", "../data/masterset"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-TRAIN_PARQUET = DATA_DIR / "train_eval_set/v2.0/train_v2.0.parquet"
-EVAL_PARQUET = DATA_DIR / "train_eval_set/v2.0/eval_v2.0.parquet"
-ALL_PAPERS_PARQUET = DATA_DIR / "train_eval_set/v2.0/all_papers_with_refs_and_labels_v2.0.parquet" # not sure if needed or not
+TRAIN_PARQUET = DATA_DIR / "train_eval_set/v2.0/train.parquet"
+EVAL_PARQUET = DATA_DIR / "train_eval_set/v2.0/eval.parquet"
+ALL_PAPERS_PARQUET = DATA_DIR / "train_eval_set/v2.0/all_papers_with_refs_and_labels.parquet"
 
 OUTPUT_EMBEDDINGS_DIR = OUTPUT_DIR / "dense/SciBERT/embeddings/"
 OUTPUT_EMBEDDINGS_DIR.mkdir(parents=True, exist_ok=True)
