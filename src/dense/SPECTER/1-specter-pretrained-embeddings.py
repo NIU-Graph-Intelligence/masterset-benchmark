@@ -23,12 +23,12 @@ from dotenv import load_dotenv
 
 # -------- Config --------
 load_dotenv()
-DATA_DIR = Path(os.getenv("DATA_DIR", "../data/masterset_v1"))
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
+ROOT_DIR = Path(os.getenv("ROOT_DIR", "/home/ratul/mustcite/"))
+OUTPUT_DIR = ROOT_DIR / "masterset-benchmark/output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-TRAIN_PARQUET = DATA_DIR / "train_eval_set/v2.0/train.parquet"
-EVAL_PARQUET = DATA_DIR / "train_eval_set/v2.0/eval.parquet"
+TRAIN_PARQUET = ROOT_DIR / "data/train_eval_set/v1.0/train.parquet"
+EVAL_PARQUET = ROOT_DIR / "data/train_eval_set/v1.0/eval.parquet"
 
 MODEL_NAME = "allenai/specter"
 EMBED_DIR = OUTPUT_DIR / "dense/SPECTER-pretrained/embeddings/"
@@ -37,7 +37,7 @@ EMBED_DIR.mkdir(parents=True, exist_ok=True)
 BATCH_SIZE = 128
 MAX_LEN = 512
 SEP = "[SEP]"
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 import time
 def log(msg):
