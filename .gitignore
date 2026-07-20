@@ -24,6 +24,7 @@ data/
 logs/
 output_april_2026/
 output/
+not_needed/
 
 # File extensions
 *.log
