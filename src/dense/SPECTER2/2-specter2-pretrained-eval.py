@@ -19,11 +19,11 @@ from dotenv import load_dotenv
 
 # -------- Config --------
 load_dotenv()
-DATA_DIR = Path(os.getenv("DATA_DIR", "../data/masterset_v1"))
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
+ROOT_DIR = Path(os.getenv("ROOT_DIR", "/home/ratul/mustcite/"))
+OUTPUT_DIR = ROOT_DIR / "masterset-benchmark/output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-EVAL_PARQUET = DATA_DIR / "train_eval_set/v2.0/eval.parquet"
+EVAL_PARQUET = ROOT_DIR / "data/train_eval_set/v1.0/eval.parquet"
 EMBED_DIR = OUTPUT_DIR / "dense/SPECTER2-pretrained/embeddings/"
 RESULTS_DIR = OUTPUT_DIR / "dense/SPECTER2-pretrained/evaluation_results/"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
