@@ -10,8 +10,8 @@ Resume capability:
   - Checkpoints are saved after every epoch.
 
 Input:
-  - data/train_eval_set/v2.0/train_v2.0.parquet
-  - data/train_eval_set/v2.0/all_papers_with_refs_and_labels_v2.0.parquet  (text lookup for cited papers)
+  - data/train_eval_set/v1.0/train.parquet
+  - data/train_eval_set/v1.0/all_papers_with_refs_and_labels.parquet  (text lookup for cited papers)
 
 Output (per label type):
   - output/dense/SciBERT-NTXent/fine_tuned_models/<type_key>/final_model.pt
@@ -38,16 +38,17 @@ from scibert_ntx_utils import (
 
 # -------- Config --------
 load_dotenv()
-DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
+ROOT_DIR = Path(os.getenv("ROOT_DIR", "/home/ratul/mustcite/"))
+OUTPUT_DIR = ROOT_DIR / "masterset-benchmark/output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-TRAIN_PARQUET = DATA_DIR / "train_eval_set/v2.0/train_v2.0.parquet"
-ALL_PAPERS_PARQUET = DATA_DIR / "train_eval_set/v2.0/all_papers_with_refs_and_labels_v2.0.parquet"
+TRAIN_PARQUET = ROOT_DIR / "data/train_eval_set/v1.0/train.parquet"
+ALL_PAPERS_PARQUET = ROOT_DIR / "data/train_eval_set/v1.0/all_papers_with_refs_and_labels.parquet"
 
 MODELS_DIR = OUTPUT_DIR / "dense/SciBERT-NTXent/fine_tuned_models/"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # ======================================================================
