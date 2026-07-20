@@ -21,8 +21,11 @@ from argnn_utils import (
     LABEL_TYPES, IN_DIM, HIDDEN, OUT_DIM, GAT_HEADS,
 )
 
+# -------- Config --------
 load_dotenv()
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
+ROOT_DIR = Path(os.getenv("ROOT_DIR", "/home/ratul/mustcite/"))
+OUTPUT_DIR = ROOT_DIR / "masterset-benchmark/output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ARGNN_DIR = OUTPUT_DIR / "graph/AR-GNN/"
 GRAPH_CACHE = ARGNN_DIR / "graph_cache.pkl"

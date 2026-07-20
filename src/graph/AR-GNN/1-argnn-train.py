@@ -34,12 +34,14 @@ from argnn_utils import (
     LABEL_TYPES, IN_DIM, HIDDEN, OUT_DIM, GAT_HEADS, LR, EPOCHS,
 )
 
+# -------- Config --------
 load_dotenv()
-DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
+ROOT_DIR = Path(os.getenv("ROOT_DIR", "/home/ratul/mustcite/"))
+OUTPUT_DIR = ROOT_DIR / "masterset-benchmark/output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-TRAIN_PARQUET = DATA_DIR / "train_eval_set/v2.0/train_v2.0.parquet"
-EVAL_PARQUET = DATA_DIR / "train_eval_set/v2.0/eval_v2.0.parquet"
+TRAIN_PARQUET = ROOT_DIR / "data/train_eval_set/v1.0/train.parquet"
+EVAL_PARQUET = ROOT_DIR / "data/train_eval_set/v1.0/eval.parquet"
 
 ARGNN_DIR = OUTPUT_DIR / "graph/AR-GNN/"
 ARGNN_DIR.mkdir(parents=True, exist_ok=True)
