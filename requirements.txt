@@ -20,3 +20,4 @@ colbert-ai
 ujson
 bitarray
 scikit-learn>=1.3.0
+adapters
