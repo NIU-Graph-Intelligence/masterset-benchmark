@@ -31,8 +31,11 @@ import csv
 from pathlib import Path
 from dotenv import load_dotenv
 
+# -------- Config --------
 load_dotenv()
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
+ROOT_DIR = Path(os.getenv("ROOT_DIR", "/home/ratul/mustcite/"))
+OUTPUT_DIR = ROOT_DIR / "masterset-benchmark/output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 CONCEPTNET_DIR = OUTPUT_DIR / "graph/KTR/conceptnet/"
 CONCEPTNET_DIR.mkdir(parents=True, exist_ok=True)

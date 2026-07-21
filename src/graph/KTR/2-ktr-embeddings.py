@@ -27,14 +27,16 @@ from ktr_utils import (
     LABEL_TYPES, EMBED_DIM, HIDDEN_DIM, NUM_TOPICS, MAX_CONCEPTS_PER_PAPER,
 )
 
+# -------- Config --------
 load_dotenv()
-DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
+ROOT_DIR = Path(os.getenv("ROOT_DIR", "/home/ratul/mustcite/"))
+OUTPUT_DIR = ROOT_DIR / "masterset-benchmark/output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CONCEPTNET_DB = Path(os.getenv("CONCEPTNET_DB", "conceptnet.db"))
 
-TRAIN_PARQUET = DATA_DIR / "train_eval_set/v2.0/train_v2.0.parquet"
-EVAL_PARQUET = DATA_DIR / "train_eval_set/v2.0/eval_v2.0.parquet"
-ALL_PAPERS_PARQUET = DATA_DIR / "train_eval_set/v2.0/all_papers_with_refs_and_labels_v2.0.parquet"
+TRAIN_PARQUET = ROOT_DIR / "data/train_eval_set/v1.0/train.parquet"
+EVAL_PARQUET = ROOT_DIR / "data/train_eval_set/v1.0/eval.parquet"
+ALL_PAPERS_PARQUET = ROOT_DIR / "data/train_eval_set/v1.0/all_papers_with_refs_and_labels.parquet"
 
 KTR_DIR = OUTPUT_DIR / "graph/KTR/"
 PREPROCESS_DIR = KTR_DIR / "preprocessed/"
