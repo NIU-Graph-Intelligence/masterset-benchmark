@@ -24,11 +24,13 @@ from litfm_utils import (
     LABEL_TYPES, EVAL_K_VALUES, TYPE_2_THRESHOLD, TYPE_3_THRESHOLD,
 )
 
+# -------- Config --------
 load_dotenv()
-DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
+ROOT_DIR = Path(os.getenv("ROOT_DIR", "/home/ratul/mustcite/"))
+OUTPUT_DIR = ROOT_DIR / "masterset-benchmark/output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-EVAL_PARQUET = DATA_DIR / "train_eval_set/v2.0/eval_v2.0.parquet"
+EVAL_PARQUET = ROOT_DIR / "data/train_eval_set/v1.0/eval.parquet"
 
 EMBEDDINGS_BASE_DIR = OUTPUT_DIR / "graph/LitFM/embeddings/"
 
